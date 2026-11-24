@@ -1,0 +1,48 @@
+{
+  "name": "ai-assistant-character",
+  "version": "1.0.0",
+  "description": "Customizable 2D/PNGTuber floating desktop AI assistant character powered by Google Gemini (screen vision + audio transcription).",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "node ./scripts/dev.mjs",
+    "dev:vite": "node ./node_modules/vite/bin/vite.js",
+    "dev:electron": "node ./scripts/build-electron.mjs && node ./node_modules/electron/cli.js .",
+    "build:electron": "node ./scripts/build-electron.mjs",
+    "build": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/vite/bin/vite.js build && node ./scripts/build-electron.mjs",
+    "start": "node ./node_modules/electron/cli.js .",
+    "launch": "node ./scripts/launch.mjs",
+    "test": "node ./node_modules/vitest/vitest.mjs run",
+    "test:watch": "node ./node_modules/vitest/vitest.mjs"
+  },
+  "keywords": [
+    "electron",
+    "ai-assistant",
+    "desktop-pet",
+    "pngtuber",
+    "gemini",
+    "screenshot",
+    "transcription"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@google/genai": "^2.29.1",
+    "dotenv": "^16.4.7",
+    "lucide-react": "^0.475.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.0.6",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^35.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.1",
+    "vitest": "^3.0.7",
+    "wait-on": "^8.0.2"
+  }
+}
