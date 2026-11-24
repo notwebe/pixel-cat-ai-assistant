@@ -1,6 +1,8 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import {
   app,
@@ -11,41 +13,61 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  safeStorage,
   screen,
+  session,
   Tray,
+  type IpcMainEvent,
+  type IpcMainInvokeEvent,
 } from 'electron';
 import type {
-  AssistantSettings,
+  ChatHistoryTurn,
   ChatStreamEvent,
   CropRect,
+  PersistedHistory,
   PickedAudioFile,
   SendChatRequest,
+  SettingsPatch,
   SnipBackdropPayload,
-  SpriteStateKey,
   TranscribeRequest,
   WindowWorkAreaInfo,
 } from '../src/types';
 import { GeminiService } from './services/geminiService';
+import { HistoryStore } from './services/historyStore';
+import { AudioUnsupportedError, OrcaRouterService } from './services/orcaRouterService';
 import {
   captureDisplayFrame,
   cropCapturedFrame,
   imageToAttachment,
   type CapturedScreenFrame,
 } from './services/screenshotService';
-import { SettingsStore } from './services/settingsStore';
+import {
+  isValidSpriteStateKey,
+  SettingsStore,
+  type SecretCipher,
+} from './services/settingsStore';
 
 const COMPACT_WIDTH = 176;
 const COMPACT_HEIGHT = 152;
 const EXPANDED_WIDTH = 460;
 const EXPANDED_HEIGHT = 620;
+const MAX_PICKED_AUDIO_TOKENS = 20;
 
 let mainWindow: BrowserWindow | null = null;
 let snipWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let pendingSnipFrame: CapturedScreenFrame | null = null;
+let isOpeningSnip = false;
+let snipRestoresMainWindow = false;
 let settingsStore: SettingsStore;
+let historyStore: HistoryStore;
 let isPanelExpanded = false;
+
 const geminiService = new GeminiService();
+const orcaRouterService = new OrcaRouterService();
+const activeChatControllers = new Map<string, AbortController>();
+const pickedAudioMap = new Map<string, { filePath: string; mimeType: string }>();
+const hotkeyStatus: Record<string, boolean> = {};
 
 const AUDIO_MIME_BY_EXT: Record<string, string> = {
   '.mp3': 'audio/mp3',
@@ -62,6 +84,84 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFromMainWindow(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents);
+}
+
+function isFromSnipWindow(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
+  return Boolean(snipWindow && !snipWindow.isDestroyed() && event.sender === snipWindow.webContents);
+}
+
+function assertMainWindowSender(event: IpcMainInvokeEvent): void {
+  if (!isFromMainWindow(event)) {
+    throw new Error('Unauthorized IPC sender.');
+  }
+}
+
+function assertSnipWindowSender(event: IpcMainInvokeEvent): void {
+  if (!isFromSnipWindow(event)) {
+    throw new Error('Unauthorized snip IPC sender.');
+  }
+}
+
+function getTrustedDevServerOrigin(): string | null {
+  if (app.isPackaged) {
+    return null;
+  }
+  const raw = process.env.VITE_DEV_SERVER_URL?.trim();
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = new URL(raw);
+    if (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+    ) {
+      return parsed.origin;
+    }
+  } catch {
+    // Ignore invalid dev server URL
+  }
+  return null;
+}
+
+function isAllowedNavigationUrl(targetUrl: string, page: 'index.html' | 'snip.html'): boolean {
+  try {
+    const parsed = new URL(targetUrl);
+    const trustedDevOrigin = getTrustedDevServerOrigin();
+    if (trustedDevOrigin) {
+      return parsed.origin === trustedDevOrigin;
+    }
+    if (parsed.protocol === 'file:') {
+      const expectedPath = path.resolve(__dirname, '../dist', page);
+      const actualPath = path.resolve(fileURLToPath(parsed));
+      return process.platform === 'win32'
+        ? actualPath.toLowerCase() === expectedPath.toLowerCase()
+        : actualPath === expectedPath;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function hardenWindowNavigation(win: BrowserWindow, page: 'index.html' | 'snip.html'): void {
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, targetUrl) => {
+    if (!isAllowedNavigationUrl(targetUrl, page)) {
+      event.preventDefault();
+    }
+  });
+  win.webContents.on('will-attach-webview', (event) => {
+    event.preventDefault();
+  });
+}
+
 function getTargetWindowSize(expanded = isPanelExpanded): { width: number; height: number } {
   return expanded
     ? { width: EXPANDED_WIDTH, height: EXPANDED_HEIGHT }
@@ -76,6 +176,25 @@ function getDefaultWindowPosition(): { x: number; y: number } {
     x: Math.round(x + width - size.width - 24),
     y: Math.round(y + height - size.height - 6),
   };
+}
+
+function clampWindowToNearestDisplay(win: BrowserWindow): void {
+  if (win.isDestroyed()) return;
+  const bounds = win.getBounds();
+  const display = screen.getDisplayNearestPoint({
+    x: Math.round(bounds.x + bounds.width / 2),
+    y: Math.round(bounds.y + bounds.height / 2),
+  });
+  const { workArea } = display;
+  const minX = workArea.x;
+  const maxX = Math.max(minX, workArea.x + workArea.width - bounds.width);
+  const minY = workArea.y;
+  const maxY = Math.max(minY, workArea.y + workArea.height - bounds.height);
+  const nextX = Math.max(minX, Math.min(bounds.x, maxX));
+  const nextY = Math.max(minY, Math.min(bounds.y, maxY));
+  if (nextX !== bounds.x || nextY !== bounds.y) {
+    win.setPosition(Math.round(nextX), Math.round(nextY));
+  }
 }
 
 function setPanelWindowMode(open: boolean): void {
@@ -129,8 +248,8 @@ function createTrayIcon(): Electron.NativeImage {
       const dist = Math.hypot(x - cx, y - cy);
       if (dist <= 6.8) {
         // Soft indigo/violet Mochi orb
-        const isEye = (y === 7 && (x === 5 || x === 10));
-        const isBlush = (y === 9 && (x === 4 || x === 11));
+        const isEye = y === 7 && (x === 5 || x === 10);
+        const isBlush = y === 9 && (x === 4 || x === 11);
         if (isEye) {
           raw[px] = 30;
           raw[px + 1] = 27;
@@ -199,9 +318,9 @@ function getPreloadPath(): string {
 }
 
 function loadRendererPage(win: BrowserWindow, page: 'index.html' | 'snip.html'): void {
-  const devUrl = process.env.VITE_DEV_SERVER_URL;
-  if (devUrl) {
-    const target = page === 'index.html' ? devUrl : `${devUrl.replace(/\/$/, '')}/${page}`;
+  const trustedDevOrigin = getTrustedDevServerOrigin();
+  if (trustedDevOrigin) {
+    const target = page === 'index.html' ? `${trustedDevOrigin}/` : `${trustedDevOrigin}/${page}`;
     void win.loadURL(target);
   } else {
     void win.loadFile(path.join(__dirname, '../dist', page));
@@ -228,16 +347,24 @@ function createMainWindow(): BrowserWindow {
       preload: getPreloadPath(),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   });
 
+  mainWindow = win;
   win.setAlwaysOnTop(true, 'floating');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  hardenWindowNavigation(win, 'index.html');
   loadRendererPage(win, 'index.html');
 
   win.on('closed', () => {
-    mainWindow = null;
+    for (const controller of activeChatControllers.values()) {
+      controller.abort();
+    }
+    activeChatControllers.clear();
+    if (mainWindow === win) {
+      mainWindow = null;
+    }
     isPanelExpanded = false;
   });
 
@@ -249,7 +376,7 @@ function getAutoSaveDir(): string | undefined {
 }
 
 async function performFullScreenCapture(): Promise<ReturnType<typeof imageToAttachment>> {
-  const wasVisible = mainWindow?.isVisible() ?? false;
+  const wasVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
   if (wasVisible) {
     mainWindow?.hide();
     await sleep(130);
@@ -266,58 +393,76 @@ async function performFullScreenCapture(): Promise<ReturnType<typeof imageToAtta
 }
 
 async function openRegionSnipOverlay(): Promise<void> {
+  if (isOpeningSnip) {
+    return;
+  }
   if (snipWindow && !snipWindow.isDestroyed()) {
     snipWindow.focus();
     return;
   }
 
-  const wasVisible = mainWindow?.isVisible() ?? false;
-  if (wasVisible) {
-    mainWindow?.hide();
-    await sleep(130);
-  }
-
+  isOpeningSnip = true;
   try {
-    pendingSnipFrame = await captureDisplayFrame();
-  } catch (err) {
-    if (wasVisible && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
+    const wasVisible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+    if (wasVisible) {
+      mainWindow?.hide();
+      await sleep(130);
     }
-    throw err;
+
+    try {
+      pendingSnipFrame = await captureDisplayFrame();
+    } catch (err) {
+      if (wasVisible && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+      }
+      throw err;
+    }
+
+    snipRestoresMainWindow = wasVisible;
+    const { bounds } = pendingSnipFrame.display;
+
+    const overlay = new BrowserWindow({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      frame: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      movable: false,
+      fullscreenable: false,
+      hasShadow: false,
+      webPreferences: {
+        preload: getPreloadPath(),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+
+    snipWindow = overlay;
+    overlay.setBounds(bounds);
+    overlay.setAlwaysOnTop(true, 'screen-saver');
+    hardenWindowNavigation(overlay, 'snip.html');
+    loadRendererPage(overlay, 'snip.html');
+    overlay.focus();
+
+    overlay.on('closed', () => {
+      if (snipWindow === overlay) {
+        snipWindow = null;
+      }
+      pendingSnipFrame = null;
+      const shouldRestore = snipRestoresMainWindow;
+      snipRestoresMainWindow = false;
+      if (shouldRestore && mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+        mainWindow.show();
+      }
+    });
+  } finally {
+    isOpeningSnip = false;
   }
-
-  const { bounds } = pendingSnipFrame.display;
-
-  snipWindow = new BrowserWindow({
-    x: bounds.x,
-    y: bounds.y,
-    width: bounds.width,
-    height: bounds.height,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    resizable: false,
-    movable: false,
-    fullscreenable: false,
-    hasShadow: false,
-    webPreferences: {
-      preload: getPreloadPath(),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  });
-
-  snipWindow.setAlwaysOnTop(true, 'screen-saver');
-  loadRendererPage(snipWindow, 'snip.html');
-
-  snipWindow.on('closed', () => {
-    snipWindow = null;
-    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
-      mainWindow.show();
-    }
-  });
 }
 
 function setupTray(): void {
@@ -328,7 +473,7 @@ function setupTray(): void {
     {
       label: 'Toggle Assistant Panel (Ctrl+Shift+Space)',
       click: () => {
-        if (!mainWindow) return;
+        if (!mainWindow || mainWindow.isDestroyed()) return;
         mainWindow.show();
         mainWindow.focus();
         mainWindow.webContents.send('panel:toggle', 'chat');
@@ -340,8 +485,11 @@ function setupTray(): void {
       click: async () => {
         try {
           const shot = await performFullScreenCapture();
-          mainWindow?.show();
-          mainWindow?.webContents.send('screen:captured', shot);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.show();
+            mainWindow.focus();
+            mainWindow.webContents.send('screen:captured', shot);
+          }
         } catch (err) {
           console.error('Full screen capture failed:', err);
         }
@@ -358,7 +506,7 @@ function setupTray(): void {
     {
       label: 'Open Audio Transcription',
       click: () => {
-        if (!mainWindow) return;
+        if (!mainWindow || mainWindow.isDestroyed()) return;
         mainWindow.show();
         mainWindow.focus();
         mainWindow.webContents.send('panel:toggle', 'transcribe');
@@ -368,7 +516,7 @@ function setupTray(): void {
     {
       label: 'Reset Character Position',
       click: () => {
-        if (!mainWindow) return;
+        if (!mainWindow || mainWindow.isDestroyed()) return;
         const pos = getDefaultWindowPosition();
         mainWindow.setPosition(pos.x, pos.y);
         mainWindow.show();
@@ -377,7 +525,7 @@ function setupTray(): void {
     {
       label: 'Hide / Show Character',
       click: () => {
-        if (!mainWindow) return;
+        if (!mainWindow || mainWindow.isDestroyed()) return;
         if (mainWindow.isVisible()) {
           mainWindow.hide();
         } else {
@@ -394,7 +542,7 @@ function setupTray(): void {
 
   tray.setContextMenu(menu);
   tray.on('click', () => {
-    if (!mainWindow) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.show();
     mainWindow.focus();
     mainWindow.webContents.send('panel:toggle');
@@ -402,48 +550,74 @@ function setupTray(): void {
 }
 
 function registerShortcuts(): void {
-  globalShortcut.register('CommandOrControl+Shift+Space', () => {
-    if (!mainWindow) return;
-    if (!mainWindow.isVisible()) {
-      mainWindow.show();
-    }
-    mainWindow.focus();
-    mainWindow.webContents.send('panel:toggle');
-  });
+  hotkeyStatus['CommandOrControl+Shift+Space'] = globalShortcut.register(
+    'CommandOrControl+Shift+Space',
+    () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (!mainWindow.isVisible()) {
+        mainWindow.show();
+      }
+      mainWindow.focus();
+      mainWindow.webContents.send('panel:toggle');
+    },
+  );
 
-  globalShortcut.register('CommandOrControl+Shift+S', async () => {
-    try {
-      const shot = await performFullScreenCapture();
-      mainWindow?.show();
-      mainWindow?.focus();
-      mainWindow?.webContents.send('screen:captured', shot);
-    } catch (err) {
-      console.error('Shortcut full-screen capture failed:', err);
-    }
-  });
+  hotkeyStatus['CommandOrControl+Shift+S'] = globalShortcut.register(
+    'CommandOrControl+Shift+S',
+    async () => {
+      try {
+        const shot = await performFullScreenCapture();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.show();
+          mainWindow.focus();
+          mainWindow.webContents.send('screen:captured', shot);
+        }
+      } catch (err) {
+        console.error('Shortcut full-screen capture failed:', err);
+      }
+    },
+  );
 
-  globalShortcut.register('CommandOrControl+Shift+R', () => {
-    void openRegionSnipOverlay().catch((err) => {
-      console.error('Shortcut region capture failed:', err);
-    });
-  });
+  hotkeyStatus['CommandOrControl+Shift+R'] = globalShortcut.register(
+    'CommandOrControl+Shift+R',
+    () => {
+      void openRegionSnipOverlay().catch((err) => {
+        console.error('Shortcut region capture failed:', err);
+      });
+    },
+  );
+
+  for (const [accelerator, registered] of Object.entries(hotkeyStatus)) {
+    if (!registered) {
+      console.warn(`Global hotkey could not be registered (conflict): ${accelerator}`);
+    }
+  }
 }
 
 function registerIpcHandlers(): void {
   // Settings & custom PNGTuber sprites
-  ipcMain.handle('settings:get', () => settingsStore.getView());
+  ipcMain.handle('settings:get', (event) => {
+    assertMainWindowSender(event);
+    return settingsStore.getView();
+  });
 
-  ipcMain.handle('settings:save', (_event, patch: Partial<AssistantSettings>) =>
-    settingsStore.update(patch),
-  );
+  ipcMain.handle('settings:save', (event, patch: unknown) => {
+    assertMainWindowSender(event);
+    if (!isPlainObject(patch)) {
+      throw new Error('Invalid settings payload.');
+    }
+    return settingsStore.update(patch as SettingsPatch);
+  });
 
-  ipcMain.handle('sprites:pick', async (_event, state: SpriteStateKey) => {
+  ipcMain.handle('sprites:pick', async (event, state: unknown) => {
+    assertMainWindowSender(event);
+    if (!isValidSpriteStateKey(state)) {
+      throw new Error('Invalid sprite state.');
+    }
     const result = await dialog.showOpenDialog({
       title: `Choose custom sprite for "${state}" state`,
       properties: ['openFile'],
-      filters: [
-        { name: 'Images', extensions: ['png', 'gif', 'webp', 'jpg', 'jpeg', 'svg'] },
-      ],
+      filters: [{ name: 'Images', extensions: ['png', 'gif', 'webp', 'jpg', 'jpeg'] }],
     });
     if (result.canceled || result.filePaths.length === 0) {
       return null;
@@ -451,12 +625,89 @@ function registerIpcHandlers(): void {
     return settingsStore.saveSpriteFile(state, result.filePaths[0]);
   });
 
-  ipcMain.handle('sprites:reset', () => settingsStore.resetSprites());
+  ipcMain.handle('sprites:clear', (event, state: unknown) => {
+    assertMainWindowSender(event);
+    if (!isValidSpriteStateKey(state)) {
+      throw new Error('Invalid sprite state.');
+    }
+    return settingsStore.clearSprite(state);
+  });
+
+  ipcMain.handle('sprites:reset', (event) => {
+    assertMainWindowSender(event);
+    return settingsStore.resetSprites();
+  });
+
+  ipcMain.handle('orcarouter:listModels', async (event, rawOverride: unknown) => {
+    assertMainWindowSender(event);
+    if (rawOverride !== undefined && !isPlainObject(rawOverride)) {
+      throw new Error('Invalid OrcaRouter model query.');
+    }
+    const override = (rawOverride ?? {}) as { baseUrl?: unknown; apiKey?: unknown };
+    const apiKeyOverride =
+      typeof override.apiKey === 'string' ? override.apiKey.trim() : '';
+    const baseUrlOverride =
+      typeof override.baseUrl === 'string' ? override.baseUrl.trim() : '';
+
+    const apiKey = apiKeyOverride || settingsStore.getEffectiveOrcaRouterApiKey();
+    const baseUrl = baseUrlOverride || settingsStore.readRaw().orcaRouterBaseUrl;
+    return orcaRouterService.listModels({ apiKey, baseUrl });
+  });
 
   // Chat & Vision streaming
-  ipcMain.handle('chat:send', async (event, req: SendChatRequest) => {
+  ipcMain.handle('chat:send', async (event, rawReq: unknown) => {
+    assertMainWindowSender(event);
+    if (!isPlainObject(rawReq)) {
+      throw new Error('Invalid chat request payload.');
+    }
+
+    const req = rawReq as Partial<SendChatRequest>;
+    const requestId = typeof req.requestId === 'string' ? req.requestId.trim() : '';
+    if (!requestId) {
+      throw new Error('Chat requestId must be a non-empty string.');
+    }
+    if (typeof req.prompt !== 'string') {
+      throw new Error('Chat prompt must be a string.');
+    }
+    if (req.imageBase64 !== undefined && typeof req.imageBase64 !== 'string') {
+      throw new Error('Chat imageBase64 must be a string.');
+    }
+    if (req.imageMimeType !== undefined && typeof req.imageMimeType !== 'string') {
+      throw new Error('Chat imageMimeType must be a string.');
+    }
+    if (
+      req.previousInteractionId !== undefined &&
+      req.previousInteractionId !== null &&
+      typeof req.previousInteractionId !== 'string'
+    ) {
+      throw new Error('Chat previousInteractionId must be a string or null.');
+    }
+    if (req.history !== undefined && !Array.isArray(req.history)) {
+      throw new Error('Chat history must be an array.');
+    }
+
+    const sanitizedHistory: ChatHistoryTurn[] = Array.isArray(req.history)
+      ? req.history
+          .filter(
+            (turn): turn is ChatHistoryTurn =>
+              isPlainObject(turn) &&
+              (turn.role === 'user' || turn.role === 'assistant') &&
+              typeof turn.text === 'string' &&
+              turn.text.trim().length > 0,
+          )
+          .slice(-20)
+      : [];
+
+    activeChatControllers.get(requestId)?.abort();
+    const controller = new AbortController();
+    activeChatControllers.set(requestId, controller);
+
+    const onSenderDestroyed = () => {
+      controller.abort();
+    };
+    event.sender.once('destroyed', onSenderDestroyed);
+
     const settings = settingsStore.readRaw();
-    const apiKey = settingsStore.getEffectiveApiKey();
 
     const emit = (payload: ChatStreamEvent) => {
       if (!event.sender.isDestroyed()) {
@@ -464,44 +715,103 @@ function registerIpcHandlers(): void {
       }
     };
 
+    const onDelta = (chunk: string) => {
+      if (event.sender.isDestroyed()) {
+        controller.abort();
+        return;
+      }
+      emit({ requestId, type: 'delta', text: chunk });
+    };
+
     try {
-      const result = await geminiService.streamChat(
-        {
-          apiKey,
-          model: settings.chatModel,
-          systemPrompt: settings.systemPrompt,
-          prompt: req.prompt,
-          imageBase64: req.imageBase64,
-          imageMimeType: req.imageMimeType,
-          previousInteractionId: req.previousInteractionId,
-        },
-        {
-          onDelta: (chunk) => {
-            emit({ requestId: req.requestId, type: 'delta', text: chunk });
-          },
-        },
-      );
+      const result =
+        settings.aiProvider === 'orcarouter'
+          ? await orcaRouterService.streamChat(
+              {
+                apiKey: settingsStore.getEffectiveOrcaRouterApiKey(),
+                model: settings.orcaRouterModel,
+                baseUrl: settings.orcaRouterBaseUrl,
+                systemPrompt: settings.systemPrompt,
+                prompt: req.prompt,
+                imageBase64: req.imageBase64,
+                imageMimeType: req.imageMimeType,
+                history: sanitizedHistory,
+                signal: controller.signal,
+              },
+              { onDelta },
+            )
+          : await geminiService.streamChat(
+              {
+                apiKey: settingsStore.getEffectiveApiKey(),
+                model: settings.chatModel,
+                systemPrompt: settings.systemPrompt,
+                prompt: req.prompt,
+                imageBase64: req.imageBase64,
+                imageMimeType: req.imageMimeType,
+                previousInteractionId: req.previousInteractionId,
+                signal: controller.signal,
+              },
+              { onDelta },
+            );
 
       emit({
-        requestId: req.requestId,
+        requestId,
         type: 'done',
         interactionId: result.interactionId,
       });
     } catch (err) {
-      emit({
-        requestId: req.requestId,
-        type: 'error',
-        error: err instanceof Error ? err.message : String(err),
-      });
+      if (!controller.signal.aborted && !event.sender.isDestroyed()) {
+        emit({
+          requestId,
+          type: 'error',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } finally {
+      if (!event.sender.isDestroyed()) {
+        event.sender.removeListener('destroyed', onSenderDestroyed);
+      }
+      if (activeChatControllers.get(requestId) === controller) {
+        activeChatControllers.delete(requestId);
+      }
     }
   });
 
+  ipcMain.handle('chat:cancel', (event, requestId: unknown) => {
+    assertMainWindowSender(event);
+    if (typeof requestId !== 'string' || !requestId.trim()) {
+      throw new Error('Chat requestId must be a non-empty string.');
+    }
+    activeChatControllers.get(requestId.trim())?.abort();
+  });
+
+  // History persistence
+  ipcMain.handle('history:load', (event) => {
+    assertMainWindowSender(event);
+    return historyStore.load();
+  });
+
+  ipcMain.handle('history:save', (event, history: unknown) => {
+    assertMainWindowSender(event);
+    if (!isPlainObject(history)) {
+      throw new Error('Invalid history payload.');
+    }
+    historyStore.save(history as unknown as PersistedHistory);
+  });
+
   // Screenshots & Clipboard
-  ipcMain.handle('screen:captureFull', () => performFullScreenCapture());
+  ipcMain.handle('screen:captureFull', (event) => {
+    assertMainWindowSender(event);
+    return performFullScreenCapture();
+  });
 
-  ipcMain.handle('screen:startRegion', () => openRegionSnipOverlay());
+  ipcMain.handle('screen:startRegion', (event) => {
+    assertMainWindowSender(event);
+    return openRegionSnipOverlay();
+  });
 
-  ipcMain.handle('clipboard:read', () => {
+  ipcMain.handle('clipboard:read', (event) => {
+    assertMainWindowSender(event);
     const text = clipboard.readText().trim();
     const img = clipboard.readImage();
     const image = img.isEmpty() ? undefined : imageToAttachment(img, 'clipboard');
@@ -509,15 +819,83 @@ function registerIpcHandlers(): void {
   });
 
   // Audio transcription
-  ipcMain.handle('audio:transcribe', async (_event, req: TranscribeRequest) => {
-    const apiKey = settingsStore.getEffectiveApiKey();
-    const result = await geminiService.transcribeAudio({
-      apiKey,
-      audioBase64: req.audioBase64,
-      filePath: req.filePath,
-      mimeType: req.mimeType,
+  ipcMain.handle('audio:transcribe', async (event, rawReq: unknown) => {
+    assertMainWindowSender(event);
+    if (!isPlainObject(rawReq)) {
+      throw new Error('Invalid transcription request.');
+    }
+    const req = rawReq as Partial<TranscribeRequest>;
+
+    if (req.filePath !== undefined && req.filePath !== '') {
+      throw new Error('Direct file paths are not allowed over IPC; pick an audio file first.');
+    }
+    if (req.mode !== 'smart' && req.mode !== 'verbatim') {
+      throw new Error('Invalid transcription mode.');
+    }
+    if (typeof req.mimeType !== 'string' || !req.mimeType.trim()) {
+      throw new Error('Audio mimeType must be a non-empty string.');
+    }
+
+    let resolvedFilePath: string | undefined;
+    let resolvedMimeType = req.mimeType.trim();
+
+    if (req.fileToken !== undefined) {
+      if (typeof req.fileToken !== 'string' || !req.fileToken.trim()) {
+        throw new Error('Invalid audio file token.');
+      }
+      const picked = pickedAudioMap.get(req.fileToken.trim());
+      if (!picked) {
+        throw new Error('Audio file token is invalid or expired. Please pick the file again.');
+      }
+      resolvedFilePath = picked.filePath;
+      resolvedMimeType = picked.mimeType;
+    } else if (typeof req.audioBase64 !== 'string' || !req.audioBase64) {
+      throw new Error('No audio data or file token provided for transcription.');
+    }
+
+    const settings = settingsStore.readRaw();
+    const geminiApiKey = settingsStore.getEffectiveApiKey();
+    const audioInput = {
+      audioBase64: resolvedFilePath ? undefined : req.audioBase64,
+      filePath: resolvedFilePath,
+      mimeType: resolvedMimeType,
       mode: req.mode,
-    });
+    };
+
+    let result: { text: string; sourceName: string };
+    if (settings.aiProvider === 'orcarouter') {
+      const orcaApiKey = settingsStore.getEffectiveOrcaRouterApiKey();
+      if (!orcaApiKey && geminiApiKey) {
+        result = await geminiService.transcribeAudio({
+          apiKey: geminiApiKey,
+          ...audioInput,
+        });
+      } else {
+        try {
+          result = await orcaRouterService.transcribeAudio({
+            apiKey: orcaApiKey,
+            model: settings.orcaRouterModel,
+            baseUrl: settings.orcaRouterBaseUrl,
+            ...audioInput,
+          });
+        } catch (err) {
+          if (err instanceof AudioUnsupportedError && geminiApiKey) {
+            result = await geminiService.transcribeAudio({
+              apiKey: geminiApiKey,
+              ...audioInput,
+            });
+          } else {
+            throw err;
+          }
+        }
+      }
+    } else {
+      result = await geminiService.transcribeAudio({
+        apiKey: geminiApiKey,
+        ...audioInput,
+      });
+    }
+
     return {
       text: result.text,
       sourceName: result.sourceName,
@@ -525,7 +903,8 @@ function registerIpcHandlers(): void {
     };
   });
 
-  ipcMain.handle('audio:pickFile', async (): Promise<PickedAudioFile | null> => {
+  ipcMain.handle('audio:pickFile', async (event): Promise<PickedAudioFile | null> => {
+    assertMainWindowSender(event);
     const result = await dialog.showOpenDialog({
       title: 'Select an audio file to transcribe',
       properties: ['openFile'],
@@ -539,23 +918,43 @@ function registerIpcHandlers(): void {
     if (result.canceled || result.filePaths.length === 0) {
       return null;
     }
+
     const filePath = result.filePaths[0];
     const ext = path.extname(filePath).toLowerCase();
-    const stats = fs.statSync(filePath);
+    const fileName = path.basename(filePath);
+    const mimeType = AUDIO_MIME_BY_EXT[ext] ?? 'audio/mp3';
+    const stats = await fs.promises.stat(filePath);
+
+    if (pickedAudioMap.size >= MAX_PICKED_AUDIO_TOKENS) {
+      const oldestToken = pickedAudioMap.keys().next().value;
+      if (oldestToken) {
+        pickedAudioMap.delete(oldestToken);
+      }
+    }
+
+    const token = crypto.randomUUID();
+    pickedAudioMap.set(token, { filePath, mimeType });
+
     return {
-      filePath,
-      fileName: path.basename(filePath),
-      mimeType: AUDIO_MIME_BY_EXT[ext] ?? 'audio/mp3',
+      token,
+      filePath: fileName,
+      fileName,
+      mimeType,
       sizeBytes: stats.size,
     };
   });
 
   ipcMain.handle(
     'audio:saveTranscript',
-    async (_event, content: string, defaultName: string): Promise<string | null> => {
+    async (event, content: unknown, defaultName: unknown): Promise<string | null> => {
+      assertMainWindowSender(event);
+      if (typeof content !== 'string' || typeof defaultName !== 'string') {
+        throw new Error('Invalid transcript save payload.');
+      }
+      const safeDefaultName = path.basename(defaultName.trim()) || 'transcript.txt';
       const result = await dialog.showSaveDialog({
         title: 'Save Transcript',
-        defaultPath: defaultName,
+        defaultPath: safeDefaultName,
         filters: [
           { name: 'Text File', extensions: ['txt'] },
           { name: 'Markdown File', extensions: ['md'] },
@@ -564,33 +963,44 @@ function registerIpcHandlers(): void {
       if (result.canceled || !result.filePath) {
         return null;
       }
-      fs.writeFileSync(result.filePath, content, 'utf-8');
+      await fs.promises.writeFile(result.filePath, content, 'utf-8');
       return result.filePath;
     },
   );
 
   // Window interaction helpers
-  ipcMain.on('window:setIgnoreMouseEvents', (_event, ignore: boolean) => {
+  ipcMain.on('window:setIgnoreMouseEvents', (event, ignore: unknown) => {
+    if (!isFromMainWindow(event) || typeof ignore !== 'boolean') return;
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.setIgnoreMouseEvents(ignore, { forward: true });
   });
 
-  ipcMain.on('window:moveBy', (_event, dx: number, dy: number) => {
+  ipcMain.on('window:moveBy', (event, dx: unknown, dy: unknown) => {
+    if (!isFromMainWindow(event)) return;
+    if (typeof dx !== 'number' || typeof dy !== 'number' || !Number.isFinite(dx) || !Number.isFinite(dy)) {
+      return;
+    }
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const [curX, curY] = mainWindow.getPosition();
     mainWindow.setPosition(Math.round(curX + dx), Math.round(curY + dy));
   });
 
-  ipcMain.on('window:setPosition', (_event, x: number, y: number) => {
+  ipcMain.on('window:setPosition', (event, x: unknown, y: unknown) => {
+    if (!isFromMainWindow(event)) return;
+    if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return;
+    }
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.setPosition(Math.round(x), Math.round(y));
   });
 
-  ipcMain.handle('window:setPanelMode', (_event, open: boolean) => {
+  ipcMain.handle('window:setPanelMode', (event, open: unknown) => {
+    assertMainWindowSender(event);
     setPanelWindowMode(Boolean(open));
   });
 
-  ipcMain.handle('window:getWorkArea', (): WindowWorkAreaInfo => {
+  ipcMain.handle('window:getWorkArea', (event): WindowWorkAreaInfo => {
+    assertMainWindowSender(event);
     if (!mainWindow || mainWindow.isDestroyed()) {
       const primary = screen.getPrimaryDisplay();
       return {
@@ -614,14 +1024,21 @@ function registerIpcHandlers(): void {
     };
   });
 
-  ipcMain.on('window:resetPosition', () => {
+  ipcMain.handle('hotkeys:status', (event) => {
+    assertMainWindowSender(event);
+    return { ...hotkeyStatus };
+  });
+
+  ipcMain.on('window:resetPosition', (event) => {
+    if (!isFromMainWindow(event)) return;
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const pos = getDefaultWindowPosition();
     mainWindow.setPosition(pos.x, pos.y);
   });
 
   // Snip overlay IPC
-  ipcMain.handle('snip:getBackdrop', (): SnipBackdropPayload | null => {
+  ipcMain.handle('snip:getBackdrop', (event): SnipBackdropPayload | null => {
+    assertSnipWindowSender(event);
     if (!pendingSnipFrame) return null;
     return {
       dataUrl: pendingSnipFrame.dataUrl,
@@ -631,30 +1048,54 @@ function registerIpcHandlers(): void {
     };
   });
 
-  ipcMain.handle('snip:complete', (_event, rect: CropRect) => {
+  ipcMain.handle('snip:complete', (event, rawRect: unknown) => {
+    assertSnipWindowSender(event);
+    if (!isPlainObject(rawRect)) {
+      throw new Error('Invalid crop rectangle.');
+    }
+    const { x, y, width, height } = rawRect as Partial<CropRect>;
+    if (
+      typeof x !== 'number' ||
+      typeof y !== 'number' ||
+      typeof width !== 'number' ||
+      typeof height !== 'number' ||
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height)
+    ) {
+      throw new Error('Crop rectangle coordinates must be finite numbers.');
+    }
+
     const frame = pendingSnipFrame;
     pendingSnipFrame = null;
 
+    const cropped = frame
+      ? cropCapturedFrame(frame, { x, y, width, height }, getAutoSaveDir())
+      : null;
+
+    if (cropped) {
+      snipRestoresMainWindow = false;
+    }
+
     if (snipWindow && !snipWindow.isDestroyed()) {
       snipWindow.close();
     }
 
-    if (frame) {
-      const cropped = cropCapturedFrame(frame, rect, getAutoSaveDir());
-      if (cropped && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.show();
-        mainWindow.focus();
-        mainWindow.webContents.send('screen:captured', cropped);
-      }
+    if (cropped && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+      mainWindow.webContents.send('screen:captured', cropped);
     }
   });
 
-  ipcMain.handle('snip:cancel', () => {
+  ipcMain.handle('snip:cancel', (event) => {
+    assertSnipWindowSender(event);
     pendingSnipFrame = null;
     if (snipWindow && !snipWindow.isDestroyed()) {
       snipWindow.close();
-    }
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    } else if (snipRestoresMainWindow && mainWindow && !mainWindow.isDestroyed()) {
+      snipRestoresMainWindow = false;
       mainWindow.show();
     }
   });
@@ -676,11 +1117,34 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
-    settingsStore = new SettingsStore(app.getPath('userData'));
+    const userDataDir = app.getPath('userData');
+    const secretCipher: SecretCipher | undefined = safeStorage.isEncryptionAvailable()
+      ? {
+          encrypt: (value: string) => safeStorage.encryptString(value).toString('base64'),
+          decrypt: (value: string) => safeStorage.decryptString(Buffer.from(value, 'base64')),
+        }
+      : undefined;
+
+    settingsStore = new SettingsStore(userDataDir, undefined, secretCipher);
+    historyStore = new HistoryStore(userDataDir);
+
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+      const isMain = Boolean(
+        mainWindow && !mainWindow.isDestroyed() && webContents === mainWindow.webContents,
+      );
+      callback(isMain && permission === 'media');
+    });
+
     registerIpcHandlers();
     mainWindow = createMainWindow();
     setupTray();
     registerShortcuts();
+
+    screen.on('display-removed', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        clampWindowToNearestDisplay(mainWindow);
+      }
+    });
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -691,7 +1155,13 @@ if (!gotLock) {
 }
 
 app.on('will-quit', () => {
+  for (const controller of activeChatControllers.values()) {
+    controller.abort();
+  }
+  activeChatControllers.clear();
   globalShortcut.unregisterAll();
+  tray?.destroy();
+  tray = null;
 });
 
 app.on('window-all-closed', () => {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  computeDragSwingAngle,
   computeWalkBounds,
+  decayDragSwingAngle,
   pickNextWalkTarget,
   stepWalkPosition,
 } from '../src/utils/catWalker';
@@ -53,5 +55,62 @@ describe('catWalker', () => {
     expect(arrived.arrived).toBe(true);
     expect(arrived.x).toBe(150);
     expect(arrived.y).toBe(800);
+  });
+
+  it('preserves prevFacing during vertical or minimal horizontal movement', () => {
+    const verticalLeft = stepWalkPosition(
+      { x: 500, y: 800 },
+      { x: 500, y: 700 },
+      2.6,
+      'left',
+    );
+    expect(verticalLeft.facing).toBe('left');
+    expect(verticalLeft.arrived).toBe(false);
+
+    const smallDxLeft = stepWalkPosition(
+      { x: 500, y: 800 },
+      { x: 500.4, y: 720 },
+      2.6,
+      'left',
+    );
+    expect(smallDxLeft.facing).toBe('left');
+
+    const smallDxRight = stepWalkPosition(
+      { x: 500, y: 800 },
+      { x: 499.6, y: 720 },
+      2.6,
+      'right',
+    );
+    expect(smallDxRight.facing).toBe('right');
+
+    const defaultFacing = stepWalkPosition({ x: 500, y: 800 }, { x: 500, y: 700 }, 2.6);
+    expect(defaultFacing.facing).toBe('right');
+  });
+
+  it('biases walk targets 80% toward the bottom taskbar edge', () => {
+    const bounds = computeWalkBounds(
+      { x: 0, y: 0, width: 1920, height: 1032 },
+      176,
+      152,
+    );
+
+    const bottomTarget = pickNextWalkTarget({ x: 500, y: bounds.maxY }, bounds, () => 0.79);
+    expect(bottomTarget.y).toBe(bounds.maxY);
+
+    const midAirTarget = pickNextWalkTarget({ x: 500, y: bounds.maxY }, bounds, () => 0.85);
+    expect(midAirTarget.y).toBeLessThan(bounds.maxY);
+  });
+
+  it('computes clamped drag swing angles and decays smoothly to zero', () => {
+    // Dragging right produces positive clockwise angle (bottom trails left)
+    expect(computeDragSwingAngle(0, 10)).toBeCloseTo(9);
+    expect(computeDragSwingAngle(0, 100)).toBe(22);
+    expect(computeDragSwingAngle(0, -100)).toBe(-22);
+
+    // Decays smoothly and snaps to 0 once tiny
+    const decayed = decayDragSwingAngle(10, 0.8);
+    expect(decayed).toBeCloseTo(8);
+    expect(decayDragSwingAngle(0.1)).toBe(0);
+    expect(decayDragSwingAngle(-0.1)).toBe(0);
   });
 });

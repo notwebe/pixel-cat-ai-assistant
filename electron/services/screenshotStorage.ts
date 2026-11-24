@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ScreenshotAttachment } from '../../src/types';
 
+const MAX_COLLISION_ATTEMPTS = 999;
+
 function pad2(n: number): string {
   return String(n).padStart(2, '0');
 }
@@ -21,8 +23,8 @@ export function formatScreenshotFilename(
 }
 
 /**
- * Writes a PNG screenshot buffer into `targetDir` with a collision-safe timestamped filename
- * and returns the absolute file path.
+ * Writes a PNG screenshot buffer into `targetDir` with an atomic collision-safe
+ * timestamped filename (`{ flag: 'wx' }`) and returns the absolute file path.
  */
 export function saveScreenshotBuffer(
   pngBuffer: Buffer,
@@ -36,13 +38,21 @@ export function saveScreenshotBuffer(
   const ext = path.extname(baseName);
   const stem = baseName.slice(0, -ext.length);
 
-  let candidate = path.join(targetDir, baseName);
-  let counter = 2;
-  while (fs.existsSync(candidate)) {
-    candidate = path.join(targetDir, `${stem}-${counter}${ext}`);
-    counter += 1;
+  for (let attempt = 1; attempt <= MAX_COLLISION_ATTEMPTS; attempt += 1) {
+    const fileName = attempt === 1 ? baseName : `${stem}-${attempt}${ext}`;
+    const candidate = path.join(targetDir, fileName);
+    try {
+      fs.writeFileSync(candidate, pngBuffer, { flag: 'wx' });
+      return candidate;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        continue;
+      }
+      throw err;
+    }
   }
 
-  fs.writeFileSync(candidate, pngBuffer);
-  return candidate;
+  throw new Error(
+    `Could not save screenshot after ${MAX_COLLISION_ATTEMPTS} filename collision attempts.`,
+  );
 }

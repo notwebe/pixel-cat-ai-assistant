@@ -45,7 +45,7 @@ export function computeWalkBounds(
 
 /**
  * Picks the next roam target for the pixel cat.
- * 65% of walks stay along the bottom taskbar edge; 35% explore higher on the desktop.
+ * 80% of walks stay along the bottom taskbar edge; 20% explore higher on the desktop.
  */
 export function pickNextWalkTarget(
   current: Point,
@@ -64,7 +64,7 @@ export function pickNextWalkTarget(
     );
   }
 
-  const walkAlongBottom = rng() < 0.65;
+  const walkAlongBottom = rng() < 0.8;
   let targetY = bounds.maxY;
   if (!walkAlongBottom && spanY > 0) {
     const roamMinY = bounds.minY + spanY * 0.2;
@@ -78,17 +78,20 @@ export function pickNextWalkTarget(
 }
 
 /**
- * Advances the cat toward `target` by `speedPx` per tick.
+ * Advances the cat toward `target` by `speedPx` per tick, preserving `prevFacing`
+ * during mostly-vertical motion (`|dx| <= 0.5`).
  */
 export function stepWalkPosition(
   current: Point,
   target: Point,
   speedPx: number,
+  prevFacing: 'left' | 'right' = 'right',
 ): WalkStepResult {
   const dx = target.x - current.x;
   const dy = target.y - current.y;
   const dist = Math.hypot(dx, dy);
-  const facing: 'left' | 'right' = dx < -0.5 ? 'left' : dx > 0.5 ? 'right' : 'right';
+  const facing: 'left' | 'right' =
+    dx < -0.5 ? 'left' : dx > 0.5 ? 'right' : prevFacing;
 
   if (dist <= speedPx || speedPx <= 0) {
     return {
@@ -106,4 +109,25 @@ export function stepWalkPosition(
     arrived: false,
     facing,
   };
+}
+
+/**
+ * Updates pendulum swing angle (in degrees) when the cat is held & dragged by the cursor.
+ * Moving right (`dx > 0`) tilts the dangling lower body left (`+deg` clockwise around top pivot).
+ */
+export function computeDragSwingAngle(
+  currentDeg: number,
+  dx: number,
+  maxDeg = 22,
+): number {
+  const next = currentDeg + dx * 0.9;
+  return Math.max(-maxDeg, Math.min(maxDeg, next));
+}
+
+/**
+ * Smoothly damps the held cat's pendulum swing angle back toward vertical rest (`0`).
+ */
+export function decayDragSwingAngle(currentDeg: number, damping = 0.84): number {
+  const next = currentDeg * damping;
+  return Math.abs(next) < 0.15 ? 0 : next;
 }

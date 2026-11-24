@@ -1,6 +1,7 @@
 export type CharacterState =
   | 'idle'
   | 'walking'
+  | 'dragging'
   | 'listening'
   | 'thinking'
   | 'speaking'
@@ -19,6 +20,13 @@ export type SpriteStateKey = (typeof SPRITE_STATE_KEYS)[number];
 
 export type CustomSprites = Partial<Record<SpriteStateKey, string>>;
 
+export const AI_PROVIDERS = ['gemini', 'orcarouter'] as const;
+
+export type AIProvider = (typeof AI_PROVIDERS)[number];
+
+export const DEFAULT_ORCAROUTER_BASE_URL = 'https://api.orcarouter.ai/v1';
+export const DEFAULT_ORCAROUTER_MODEL = 'orcarouter/auto';
+
 export const GEMINI_CHAT_MODELS = [
   'gemini-3.8-flash',
   'gemini-3.5-flash-lite',
@@ -30,8 +38,12 @@ export type GeminiChatModel = (typeof GEMINI_CHAT_MODELS)[number];
 export type TranscriptionMode = 'smart' | 'verbatim';
 
 export interface AssistantSettings {
+  aiProvider: AIProvider;
   apiKey: string;
   chatModel: GeminiChatModel;
+  orcaRouterApiKey: string;
+  orcaRouterModel: string;
+  orcaRouterBaseUrl: string;
   characterName: string;
   systemPrompt: string;
   characterScale: number;
@@ -42,15 +54,22 @@ export interface AssistantSettings {
   sprites: CustomSprites;
 }
 
-export type SettingsPatch = Partial<Omit<AssistantSettings, 'apiKey' | 'sprites'>> & {
+export type SettingsPatch = Partial<
+  Omit<AssistantSettings, 'apiKey' | 'orcaRouterApiKey' | 'sprites'>
+> & {
   apiKey?: string | null;
+  orcaRouterApiKey?: string | null;
 };
 
 export interface SettingsView extends AssistantSettings {
   /** Always empty in IPC responses so plaintext keys are never exposed to the renderer. */
   apiKey: string;
+  orcaRouterApiKey: string;
   hasSavedApiKey: boolean;
   hasEnvApiKey: boolean;
+  hasSavedOrcaRouterApiKey: boolean;
+  hasEnvOrcaRouterApiKey: boolean;
+  orcaRouterApiKeyConfigured: boolean;
   effectiveApiKeyConfigured: boolean;
   spriteDataUrls: CustomSprites;
 }
@@ -76,12 +95,23 @@ export interface ChatMessage {
   isError?: boolean;
 }
 
+export interface ChatHistoryTurn {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
 export interface SendChatRequest {
   requestId: string;
   prompt: string;
   imageBase64?: string;
   imageMimeType?: string;
   previousInteractionId?: string | null;
+  history?: ChatHistoryTurn[];
+}
+
+export interface OrcaRouterModelOption {
+  id: string;
+  name?: string;
 }
 
 export interface ChatStreamEvent {
@@ -164,6 +194,10 @@ export interface AssistantBridgeAPI {
   pickSpriteImage: (state: SpriteStateKey) => Promise<SettingsView | null>;
   clearSpriteImage: (state: SpriteStateKey) => Promise<SettingsView>;
   resetSprites: () => Promise<SettingsView>;
+  listOrcaRouterModels: (override?: {
+    baseUrl?: string;
+    apiKey?: string;
+  }) => Promise<OrcaRouterModelOption[]>;
 
   // Chat & Vision
   sendChat: (req: SendChatRequest) => Promise<void>;

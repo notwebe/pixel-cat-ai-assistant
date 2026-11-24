@@ -3,13 +3,15 @@ import { mkdirSync } from 'node:fs';
 
 mkdirSync('dist-electron', { recursive: true });
 
+const isProduction = process.env.NODE_ENV === 'production';
+
 const commonConfig = {
   bundle: true,
   platform: 'node',
-  target: 'node20',
+  target: 'node22',
   format: 'cjs',
   external: ['electron'],
-  sourcemap: true,
+  sourcemap: !isProduction,
 };
 
 await Promise.all([

@@ -18,7 +18,7 @@ describe('screenshotStorage', () => {
     );
   });
 
-  it('writes PNG bytes and avoids overwriting on timestamp collisions', () => {
+  it('writes PNG bytes atomically with wx flag and avoids overwriting on timestamp collisions', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mochi-shots-'));
     const fixedDate = new Date(2026, 10, 24, 9, 5, 7);
     const pngBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -35,6 +35,29 @@ describe('screenshotStorage', () => {
       expect(fs.readFileSync(firstPath)).toEqual(pngBytes);
       expect(fs.readFileSync(secondPath)).toEqual(pngBytes);
       expect(fs.readFileSync(thirdPath)).toEqual(pngBytes);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws cleanly after exhausting bounded 999 collision attempts', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mochi-shots-limit-'));
+    const fixedDate = new Date(2026, 10, 24, 9, 5, 7);
+    const pngBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+
+    try {
+      const baseName = formatScreenshotFilename('region', fixedDate);
+      const ext = path.extname(baseName);
+      const stem = baseName.slice(0, -ext.length);
+
+      fs.writeFileSync(path.join(tmpDir, baseName), pngBytes);
+      for (let i = 2; i <= 999; i += 1) {
+        fs.writeFileSync(path.join(tmpDir, `${stem}-${i}${ext}`), pngBytes);
+      }
+
+      expect(() => saveScreenshotBuffer(pngBytes, tmpDir, 'region', fixedDate)).toThrow(
+        /999 filename collision attempts/i,
+      );
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

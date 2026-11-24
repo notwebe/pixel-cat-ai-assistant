@@ -24,8 +24,17 @@ try {
   process.exit(1);
 }
 
+if (!electronExe || !fs.existsSync(electronExe)) {
+  console.error('Electron binary is missing. Run "node node_modules/electron/install.js" or "npm install" first.');
+  process.exit(1);
+}
+
+const childEnv = { ...process.env };
+delete childEnv.ELECTRON_RUN_AS_NODE;
+
 const child = spawn(electronExe, ['.'], {
   cwd: rootDir,
+  env: childEnv,
   detached: true,
   stdio: 'ignore',
   windowsHide: true,

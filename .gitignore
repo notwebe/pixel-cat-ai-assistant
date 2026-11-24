@@ -1,21 +1,23 @@
 # Dependencies
 node_modules/
 
-# Build outputs
+# Build & TypeScript outputs
 dist/
 dist-electron/
 release/
+*.tsbuildinfo
 
 # Local secrets & environment variables (NEVER commit your API key!)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
-# OS & editor files
+# OS, shortcuts & editor files
 .DS_Store
 Thumbs.db
 *.log
 npm-debug.log*
+*.lnk
 .vscode/
 .idea/
 

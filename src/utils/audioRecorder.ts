@@ -50,36 +50,41 @@ export class MicAudioRecorder {
     this.startedAt = Date.now();
     this.chosenMime = pickSupportedMimeType();
 
-    const recorder = new MediaRecorder(stream, { mimeType: this.chosenMime });
-    recorder.ondataavailable = (event) => {
-      if (event.data && event.data.size > 0) {
-        this.chunks.push(event.data);
-      }
-    };
-    this.mediaRecorder = recorder;
-    recorder.start(200);
-
-    if (onLevel) {
-      const ctx = new AudioContext();
-      this.audioContext = ctx;
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      const tick = () => {
-        analyser.getByteTimeDomainData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) {
-          const normalized = (data[i] - 128) / 128;
-          sum += normalized * normalized;
+    try {
+      const recorder = new MediaRecorder(stream, { mimeType: this.chosenMime });
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          this.chunks.push(event.data);
         }
-        const rms = Math.sqrt(sum / data.length);
-        onLevel(Math.min(1, rms * 3.5));
-        this.rafId = requestAnimationFrame(tick);
       };
-      this.rafId = requestAnimationFrame(tick);
+      this.mediaRecorder = recorder;
+      recorder.start(200);
+
+      if (onLevel) {
+        const ctx = new AudioContext();
+        this.audioContext = ctx;
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        const tick = () => {
+          analyser.getByteTimeDomainData(data);
+          let sum = 0;
+          for (let i = 0; i < data.length; i++) {
+            const normalized = (data[i] - 128) / 128;
+            sum += normalized * normalized;
+          }
+          const rms = Math.sqrt(sum / data.length);
+          onLevel(Math.min(1, rms * 3.5));
+          this.rafId = requestAnimationFrame(tick);
+        };
+        this.rafId = requestAnimationFrame(tick);
+      }
+    } catch (err) {
+      this.cleanup();
+      throw err;
     }
   }
 
@@ -113,13 +118,6 @@ export class MicAudioRecorder {
   }
 
   public cancel(): void {
-    try {
-      if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-        this.mediaRecorder.stop();
-      }
-    } catch {
-      // Ignore cancel cleanup errors
-    }
     this.cleanup();
   }
 
@@ -128,8 +126,21 @@ export class MicAudioRecorder {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
+    if (this.mediaRecorder) {
+      try {
+        this.mediaRecorder.ondataavailable = null;
+        this.mediaRecorder.onstop = null;
+        this.mediaRecorder.onerror = null;
+        if (this.mediaRecorder.state !== 'inactive') {
+          this.mediaRecorder.stop();
+        }
+      } catch {
+        // Ignore recorder teardown errors
+      }
+      this.mediaRecorder = null;
+    }
     if (this.audioContext) {
-      void this.audioContext.close();
+      void this.audioContext.close().catch(() => {});
       this.audioContext = null;
     }
     if (this.stream) {
@@ -138,7 +149,6 @@ export class MicAudioRecorder {
       }
       this.stream = null;
     }
-    this.mediaRecorder = null;
     this.chunks = [];
   }
 }
