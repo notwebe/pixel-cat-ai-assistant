@@ -7,14 +7,25 @@ export type CharacterState =
   | 'happy'
   | 'error';
 
-export type SpriteStateKey = 'idle' | 'listening' | 'thinking' | 'speaking' | 'happy';
+export const SPRITE_STATE_KEYS = [
+  'idle',
+  'listening',
+  'thinking',
+  'speaking',
+  'happy',
+] as const;
+
+export type SpriteStateKey = (typeof SPRITE_STATE_KEYS)[number];
 
 export type CustomSprites = Partial<Record<SpriteStateKey, string>>;
 
-export type GeminiChatModel =
-  | 'gemini-3.8-flash'
-  | 'gemini-3.5-flash-lite'
-  | 'gemini-4-argon';
+export const GEMINI_CHAT_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-4-argon',
+] as const;
+
+export type GeminiChatModel = (typeof GEMINI_CHAT_MODELS)[number];
 
 export type TranscriptionMode = 'smart' | 'verbatim';
 
@@ -31,7 +42,14 @@ export interface AssistantSettings {
   sprites: CustomSprites;
 }
 
+export type SettingsPatch = Partial<Omit<AssistantSettings, 'apiKey' | 'sprites'>> & {
+  apiKey?: string | null;
+};
+
 export interface SettingsView extends AssistantSettings {
+  /** Always empty in IPC responses so plaintext keys are never exposed to the renderer. */
+  apiKey: string;
+  hasSavedApiKey: boolean;
   hasEnvApiKey: boolean;
   effectiveApiKeyConfigured: boolean;
   spriteDataUrls: CustomSprites;
@@ -46,6 +64,7 @@ export interface ScreenshotAttachment {
   mode: 'fullscreen' | 'region' | 'clipboard';
   capturedAt: number;
   savedPath?: string;
+  saveWarning?: string;
 }
 
 export interface ChatMessage {
@@ -75,6 +94,7 @@ export interface ChatStreamEvent {
 
 export interface TranscribeRequest {
   audioBase64?: string;
+  fileToken?: string;
   filePath?: string;
   mimeType: string;
   mode: TranscriptionMode;
@@ -94,7 +114,14 @@ export interface TranscriptEntry {
   createdAt: number;
 }
 
+export interface PersistedHistory {
+  messages: ChatMessage[];
+  transcripts: TranscriptEntry[];
+  lastInteractionId: string | null;
+}
+
 export interface PickedAudioFile {
+  token: string;
   filePath: string;
   fileName: string;
   mimeType: string;
@@ -133,13 +160,19 @@ export interface WindowWorkAreaInfo {
 export interface AssistantBridgeAPI {
   // Settings & sprites
   getSettings: () => Promise<SettingsView>;
-  saveSettings: (patch: Partial<AssistantSettings>) => Promise<SettingsView>;
+  saveSettings: (patch: SettingsPatch) => Promise<SettingsView>;
   pickSpriteImage: (state: SpriteStateKey) => Promise<SettingsView | null>;
+  clearSpriteImage: (state: SpriteStateKey) => Promise<SettingsView>;
   resetSprites: () => Promise<SettingsView>;
 
   // Chat & Vision
   sendChat: (req: SendChatRequest) => Promise<void>;
+  cancelChat: (requestId: string) => Promise<void>;
   onChatStream: (callback: (event: ChatStreamEvent) => void) => () => void;
+
+  // History persistence
+  loadHistory: () => Promise<PersistedHistory>;
+  saveHistory: (history: PersistedHistory) => Promise<void>;
 
   // Screenshots & Clipboard
   captureFullScreen: () => Promise<ScreenshotAttachment>;
@@ -158,6 +191,7 @@ export interface AssistantBridgeAPI {
   setWindowPosition: (x: number, y: number) => void;
   setPanelMode: (open: boolean) => Promise<void>;
   getWindowWorkArea: () => Promise<WindowWorkAreaInfo>;
+  getHotkeyStatus: () => Promise<Record<string, boolean>>;
   resetWindowPosition: () => void;
   onTogglePanel: (callback: (tab?: 'chat' | 'transcribe' | 'settings') => void) => () => void;
 
