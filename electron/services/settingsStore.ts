@@ -34,6 +34,7 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
   ttsEnabled: false,
   walkEnabled: true,
   autoSaveScreenshots: true,
+  openAtLogin: false,
   transcriptionMode: 'smart',
   sprites: {},
 };
@@ -73,6 +74,7 @@ interface StoredConfig {
   ttsEnabled?: unknown;
   walkEnabled?: unknown;
   autoSaveScreenshots?: unknown;
+  openAtLogin?: unknown;
   transcriptionMode?: unknown;
   sprites?: unknown;
 }
@@ -134,12 +136,14 @@ export class SettingsStore {
   private readonly envApiKeyProvider: () => string;
   private readonly envOrcaRouterKeyProvider: () => string;
   private readonly secretCipher?: SecretCipher;
+  private readonly isPackagedProvider: () => boolean;
 
   constructor(
     dataDir: string,
     envApiKeyProvider?: () => string,
     secretCipher?: SecretCipher,
     envOrcaRouterKeyProvider?: () => string,
+    isPackagedProvider?: () => boolean,
   ) {
     this.configPath = path.join(dataDir, 'config.json');
     this.spritesDir = path.join(dataDir, 'sprites');
@@ -150,6 +154,7 @@ export class SettingsStore {
       envOrcaRouterKeyProvider ??
       (() => (process.env.ORCAROUTER_API_KEY || '').trim());
     this.secretCipher = secretCipher;
+    this.isPackagedProvider = isPackagedProvider ?? (() => false);
   }
 
   private ensureDirs(): void {
@@ -229,6 +234,7 @@ export class SettingsStore {
       ttsEnabled: settings.ttsEnabled,
       walkEnabled: settings.walkEnabled,
       autoSaveScreenshots: settings.autoSaveScreenshots,
+      openAtLogin: settings.openAtLogin,
       transcriptionMode: normalizeTranscriptionMode(settings.transcriptionMode),
       sprites: this.sanitizeStoredSprites(settings.sprites),
     };
@@ -327,6 +333,10 @@ export class SettingsStore {
           typeof parsed.autoSaveScreenshots === 'boolean'
             ? parsed.autoSaveScreenshots
             : DEFAULT_SETTINGS.autoSaveScreenshots,
+        openAtLogin:
+          typeof parsed.openAtLogin === 'boolean'
+            ? parsed.openAtLogin
+            : DEFAULT_SETTINGS.openAtLogin,
         transcriptionMode: normalizeTranscriptionMode(parsed.transcriptionMode),
         sprites: this.sanitizeStoredSprites(parsed.sprites),
       };
@@ -401,6 +411,7 @@ export class SettingsStore {
       orcaRouterApiKeyConfigured,
       effectiveApiKeyConfigured:
         raw.aiProvider === 'orcarouter' ? orcaRouterApiKeyConfigured : geminiConfigured,
+      isPackaged: this.isPackagedProvider(),
       spriteDataUrls,
     };
   }
@@ -467,6 +478,10 @@ export class SettingsStore {
 
     if (typeof patch.autoSaveScreenshots === 'boolean') {
       next.autoSaveScreenshots = patch.autoSaveScreenshots;
+    }
+
+    if (typeof patch.openAtLogin === 'boolean') {
+      next.openAtLogin = patch.openAtLogin;
     }
 
     if (patch.transcriptionMode === 'smart' || patch.transcriptionMode === 'verbatim') {

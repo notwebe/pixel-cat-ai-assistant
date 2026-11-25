@@ -1,6 +1,7 @@
 import { build } from 'esbuild';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 
+rmSync('dist-electron', { recursive: true, force: true });
 mkdirSync('dist-electron', { recursive: true });
 
 const isProduction = process.env.NODE_ENV === 'production';
@@ -11,6 +12,7 @@ const commonConfig = {
   target: 'node22',
   format: 'cjs',
   external: ['electron'],
+  minify: isProduction,
   sourcemap: !isProduction,
 };
 

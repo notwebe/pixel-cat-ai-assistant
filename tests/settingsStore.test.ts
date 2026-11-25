@@ -33,6 +33,8 @@ describe('SettingsStore', () => {
       expect(view.characterName).toBe(DEFAULT_SETTINGS.characterName);
       expect(view.walkEnabled).toBe(true);
       expect(view.autoSaveScreenshots).toBe(true);
+      expect(view.openAtLogin).toBe(false);
+      expect(view.isPackaged).toBe(false);
       expect(view.hasEnvApiKey).toBe(true);
       expect(view.effectiveApiKeyConfigured).toBe(true);
       expect(store.getEffectiveApiKey()).toBe('env-secret-key');
@@ -51,6 +53,7 @@ describe('SettingsStore', () => {
         characterScale: 5,
         walkEnabled: false,
         autoSaveScreenshots: false,
+        openAtLogin: true,
       });
 
       expect(updated.apiKey).toBe('');
@@ -60,16 +63,19 @@ describe('SettingsStore', () => {
       expect(updated.characterScale).toBe(1.4);
       expect(updated.walkEnabled).toBe(false);
       expect(updated.autoSaveScreenshots).toBe(false);
+      expect(updated.openAtLogin).toBe(true);
       expect(store.getEffectiveApiKey()).toBe('saved-user-key');
 
       const lowClamped = store.update({ characterScale: 0.1 });
       expect(lowClamped.characterScale).toBe(0.65);
 
-      // Re-instantiate to confirm disk persistence
-      const reloaded = new SettingsStore(tmpDir, () => '');
+      // Re-instantiate to confirm disk persistence and isPackaged provider
+      const reloaded = new SettingsStore(tmpDir, () => '', undefined, undefined, () => true);
       expect(reloaded.readRaw().characterName).toBe('Nova');
       expect(reloaded.readRaw().walkEnabled).toBe(false);
       expect(reloaded.readRaw().autoSaveScreenshots).toBe(false);
+      expect(reloaded.readRaw().openAtLogin).toBe(true);
+      expect(reloaded.getView().isPackaged).toBe(true);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

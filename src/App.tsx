@@ -44,6 +44,7 @@ const INITIAL_SETTINGS: SettingsView = {
   ttsEnabled: false,
   walkEnabled: true,
   autoSaveScreenshots: true,
+  openAtLogin: false,
   transcriptionMode: 'smart',
   sprites: {},
   hasSavedApiKey: false,
@@ -52,6 +53,7 @@ const INITIAL_SETTINGS: SettingsView = {
   hasEnvOrcaRouterApiKey: false,
   orcaRouterApiKeyConfigured: false,
   effectiveApiKeyConfigured: false,
+  isPackaged: false,
   spriteDataUrls: {},
 };
 

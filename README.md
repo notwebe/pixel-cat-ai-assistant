@@ -6,16 +6,18 @@ A customizable **2D / PNGTuber floating desktop AI assistant character** for Win
 
 - **Roaming Pixel Cat Companion**:
   - Crisp 4× integer-scaled (`80×80`) pixel cat rendered on a transparent, always-on-top frameless window that walks along your screen (biased toward the bottom taskbar edge).
+  - **Held-Cat Drag Animation**: Pick Mochi up with your mouse to trigger a playful dangling pose with kicking paws, swaying tail, and physics-damped pendulum swing as you drag it across your screen.
   - Click-through transparent stage keeps apps behind Mochi clickable; quick action orbs stay tucked away until you hover over or click/pin the cat (or summon it from the **Windows System Tray** or `Ctrl+Shift+Space`).
-  - Built-in character states (`idle`, `walking`, `listening`, `thinking`, `speaking`, `happy`, `error`), adjustable character size, walking toggle, and position reset.
-- **Markdown Chat, Persistence & Screen Vision (`gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-4-argon`)**:
+  - Built-in character states (`idle`, `walking`, `dragging`, `listening`, `thinking`, `speaking`, `happy`, `error`), adjustable character size, walking toggle, and position reset.
+- **Multi-Provider Markdown Chat, Persistence & Screen Vision**:
+  - Supports **Google Gemini** (`gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-4-argon`) and **OrcaRouter** (OpenAI-compatible API with custom Model ID, live **Load Models** discovery, and optional Base URL).
   - Streaming replies with **Stop** cancellation and one-click **Retry** on errors.
   - Sanitized **Markdown rendering** supporting fenced code blocks with language labels and per-block **Copy** buttons, inline code, headings, bold/italic text, and lists.
   - **Persistent local history**: conversations and transcripts persist across app restarts (`history.json` in your Electron user-data folder, retaining up to 50 chat messages and 30 transcripts).
   - Capture your **full screen** (`Ctrl+Shift+S`), **snip any region** (`Ctrl+Shift+R`), attach clipboard text/images, or paste screenshots directly into the composer with `Ctrl+V`.
   - Captured screenshots are automatically saved (best-effort) as PNGs to your Windows **Downloads** folder (toggleable in Settings).
-- **Voice & Audio Transcription (`gemini-3.5-transcribe`)**:
-  - Record directly from your PC microphone with a live audio-reactive animation, **Cancel/Discard** while recording, and **Retry** if a transcription fails.
+- **Voice & Audio Transcription (`gemini-3.5-transcribe` / OrcaRouter)**:
+  - Record directly from your PC microphone with a live audio-reactive animation, **Cancel/Discard** while recording, and **Retry** if a transcription fails (uses your OrcaRouter model when active, with optional automatic fallback to your saved Gemini key).
   - Pick local audio files (`.mp3`, `.wav`, `.m4a`, `.ogg`, `.webm`, `.flac`, `.aac`, `.aiff`, up to 50 MB; files larger than 15 MB automatically use the Gemini Files API and are deleted afterward).
   - Switch between **Smart** (clean punctuation & filler removal) and **Verbatim** modes, copy or save transcripts as `.txt`, delete old entries, or send straight to Chat.
 - **Customizable 2D / PNGTuber Sprites**:
@@ -60,31 +62,36 @@ A customizable **2D / PNGTuber floating desktop AI assistant character** for Win
    npm test
    ```
 
-5. **Build production bundles** (required before `npm run launch` or `Start Pixel Cat.vbs`):
-   ```bat
-   npm run build
-   ```
+5. **Build & package Windows executables** (outputs to `release/`):
+   - **Portable `.exe` only** (`release\PixelCatAssistant.exe`):
+     ```bat
+     npm run package
+     ```
+   - **Portable `.exe` + Windows Setup Installer** (`release\PixelCatAssistant.exe` and `release\PixelCatAssistant-Setup-1.0.0.exe`):
+     ```bat
+     npm run dist
+     ```
+   - *(Optional — production bundles only without packaging)*:
+     ```bat
+     npm run build
+     ```
 
-## Launch Without a Terminal (Background Mode)
+## Launch Without a Terminal (Windows App & Background Mode)
 
-After running `npm run build`, you can launch Mochi without keeping a terminal window open:
+- **Option 1 — Packaged Windows `.exe` (Zero terminal window — Recommended):**
+  After running `npm run package` or `npm run dist`, double-click **`release\PixelCatAssistant.exe`** directly (or install via **`release\PixelCatAssistant-Setup-1.0.0.exe`**). It launches with zero terminal window and uses the built-in pixel cat icon.
 
-- **Option 1 — Detached terminal command**:
+- **Option 2 — Detached terminal command (from source after `npm run build`):**
   ```bat
   npm run launch
   ```
   Starts Electron detached in the background (stripping `ELECTRON_RUN_AS_NODE` so it works cleanly inside VS Code or Cursor terminals) and exits immediately.
 
-- **Option 2 — One-click Windows VBScript launcher (Zero terminal window)**:
-  Double-click **`Start Pixel Cat.vbs`** in the project folder. It verifies that Electron (`node_modules\electron\dist\electron.exe`) and both build outputs (`dist-electron\main.cjs` and `dist\index.html`) exist, then starts Mochi with no console window.
-
 - **Quitting the assistant**: Right-click Mochi's icon in the **Windows System Tray** (bottom-right taskbar area) and choose **Quit**.
 
 ### Optional: Auto-Start With Windows
 
-1. Right-click **`Start Pixel Cat.vbs`** and choose **Create shortcut** (any `*.lnk` files left in the repo folder are ignored by `.gitignore`).
-2. Press **`Win + R`**, type `shell:startup`, and press **Enter** to open your Windows Startup folder.
-3. Move the shortcut into the Startup folder — Mochi will now start automatically when you sign in to Windows.
+In the packaged app (`release\PixelCatAssistant.exe` or installed via Setup), open **Settings** and enable **Launch at Windows Startup**, then click **Save Settings**. Mochi automatically registers/unregisters itself with Windows startup (`app.setLoginItemSettings`).
 
 ## Keyboard Shortcuts
 
@@ -125,12 +132,6 @@ After running `npm run build`, you can launch Mochi without keeping a terminal w
   node node_modules/electron/install.js
   ```
 - If you are behind a proxy or firewall, set `ELECTRON_MIRROR` first before running the command above.
-
-### Windows blocks `Start Pixel Cat.vbs` (VBScript policy / deprecation)
-- Microsoft is deprecating VBScript on Windows 11 (moving it to an optional Feature on Demand), and some enterprise Group Policy, AppLocker, or Windows Defender / SmartScreen settings block `.vbs` (`wscript.exe`) scripts from spawning hidden background processes or flag downloaded archives with Mark-of-the-Web.
-- **Workarounds**:
-  - Run `npm run launch` from a terminal (it detaches immediately and strips `ELECTRON_RUN_AS_NODE`).
-  - Or create a standard Windows Shortcut (`.lnk`) pointing to `node_modules\electron\dist\electron.exe` with argument `.` and **Start in** set to this project directory (or register a Windows Task Scheduler entry).
 
 ## License
 

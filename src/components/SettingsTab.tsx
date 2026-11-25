@@ -52,6 +52,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [characterScale, setCharacterScale] = useState(settings.characterScale);
   const [walkEnabled, setWalkEnabled] = useState(settings.walkEnabled);
   const [autoSaveScreenshots, setAutoSaveScreenshots] = useState(settings.autoSaveScreenshots);
+  const [openAtLogin, setOpenAtLogin] = useState(settings.openAtLogin);
   const [dirty, setDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
@@ -79,6 +80,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     setCharacterScale(settings.characterScale);
     setWalkEnabled(settings.walkEnabled);
     setAutoSaveScreenshots(settings.autoSaveScreenshots);
+    setOpenAtLogin(settings.openAtLogin);
   }, [settings]);
 
   const markDirty = () => {
@@ -116,6 +118,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         characterScale,
         walkEnabled,
         autoSaveScreenshots,
+        openAtLogin,
         ...(trimmedGeminiKey ? { apiKey: trimmedGeminiKey } : {}),
         ...(trimmedOrcaKey ? { orcaRouterApiKey: trimmedOrcaKey } : {}),
       };
@@ -487,6 +490,24 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           />
           <span>Auto-save screenshots to Downloads</span>
         </label>
+
+        <label className="checkbox-row" htmlFor="open-at-login">
+          <input
+            id="open-at-login"
+            type="checkbox"
+            checked={openAtLogin}
+            onChange={(e) => {
+              setOpenAtLogin(e.target.checked);
+              markDirty();
+            }}
+          />
+          <span>Launch at Windows Startup</span>
+        </label>
+        {!settings.isPackaged && (
+          <div className="muted-meta" style={{ marginTop: -4, paddingLeft: 22 }}>
+            Takes effect when running the packaged .exe app.
+          </div>
+        )}
 
         {saveError && (
           <div className="message-bubble error" style={{ maxWidth: '100%' }}>

@@ -5,7 +5,7 @@ interface MarkdownMessageProps {
   content: string;
 }
 
-type BlockNode =
+export type BlockNode =
   | { type: 'code'; lang: string; code: string }
   | { type: 'heading'; level: 1 | 2 | 3 | 4; text: string }
   | { type: 'ul'; items: string[] }
@@ -13,17 +13,28 @@ type BlockNode =
   | { type: 'paragraph'; lines: string[] };
 
 const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g;
-const EMPHASIS_TOKEN_RE =
-  /\*\*\*([^\s*](?:[^*\n]*?[^\s*])?)\*\*\*|\*\*([^\s*](?:[^*\n]*?[^\s*])?)\*\*|\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g;
+const EMPHASIS_TOKEN_SOURCE =
+  /\*\*\*([^\s*](?:[^*\n]*?[^\s*])?)\*\*\*|\*\*([^\s*](?:(?:[^*\n]|\*(?!\*))*?[^\s*])?)\*\*|\*([^\s*](?:[^*\n]*?[^\s*])?)\*/
+    .source;
+const FENCE_OPEN_RE = /^(`{3,})([^\n]*)$/;
 
-function renderEmphasis(text: string, keyPrefix: string): React.ReactNode[] {
+function renderEmphasis(text: string, keyPrefix: string, depth = 0): React.ReactNode[] {
+  if (depth >= 6) {
+    return [text];
+  }
+
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
   let tokenIdx = 0;
-  EMPHASIS_TOKEN_RE.lastIndex = 0;
+  const re = new RegExp(EMPHASIS_TOKEN_SOURCE, 'g');
 
-  let match: RegExpExecArray | null = EMPHASIS_TOKEN_RE.exec(text);
-  while (match !== null) {
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    if (match[0].length === 0) {
+      re.lastIndex += 1;
+      continue;
+    }
+
     if (match.index > lastIndex) {
       nodes.push(text.slice(lastIndex, match.index));
     }
@@ -36,13 +47,12 @@ function renderEmphasis(text: string, keyPrefix: string): React.ReactNode[] {
         </strong>,
       );
     } else if (match[2] !== undefined) {
-      nodes.push(<strong key={key}>{renderEmphasis(match[2], key)}</strong>);
+      nodes.push(<strong key={key}>{renderEmphasis(match[2], key, depth + 1)}</strong>);
     } else if (match[3] !== undefined) {
       nodes.push(<em key={key}>{match[3]}</em>);
     }
 
     lastIndex = match.index + match[0].length;
-    match = EMPHASIS_TOKEN_RE.exec(text);
   }
 
   if (lastIndex < text.length) {
@@ -52,7 +62,7 @@ function renderEmphasis(text: string, keyPrefix: string): React.ReactNode[] {
   return nodes.length > 0 ? nodes : [text];
 }
 
-function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
+export function renderInline(text: string, keyPrefix = 'inline'): React.ReactNode[] {
   const parts = text.split(INLINE_CODE_SPLIT_RE);
   const nodes: React.ReactNode[] = [];
 
@@ -72,7 +82,7 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
   return nodes;
 }
 
-function parseMarkdownBlocks(content: string): BlockNode[] {
+export function parseMarkdownBlocks(content: string): BlockNode[] {
   const lines = content.replace(/\r\n/g, '\n').split('\n');
   const blocks: BlockNode[] = [];
   let i = 0;
@@ -86,17 +96,20 @@ function parseMarkdownBlocks(content: string): BlockNode[] {
       continue;
     }
 
-    // Fenced code block (supports unclosed trailing fence during streaming)
-    const fenceMatch = /^```([a-zA-Z0-9_+-]*)\s*$/.exec(line.trim());
+    // Fenced code block (supports 3+ backticks, info strings, and unclosed trailing fence during streaming)
+    const fenceMatch = FENCE_OPEN_RE.exec(line.trim());
     if (fenceMatch) {
-      const lang = fenceMatch[1] || '';
+      const fenceLen = fenceMatch[1].length;
+      const info = fenceMatch[2].trim();
+      const lang = info ? info.split(/\s+/)[0] : '';
+      const fenceCloseRe = new RegExp('^`{' + fenceLen + ',}\\s*$');
       const codeLines: string[] = [];
       i += 1;
-      while (i < lines.length && !/^```\s*$/.test(lines[i].trim())) {
+      while (i < lines.length && !fenceCloseRe.test(lines[i].trim())) {
         codeLines.push(lines[i]);
         i += 1;
       }
-      if (i < lines.length && /^```\s*$/.test(lines[i].trim())) {
+      if (i < lines.length && fenceCloseRe.test(lines[i].trim())) {
         i += 1;
       }
       blocks.push({ type: 'code', lang, code: codeLines.join('\n') });
@@ -139,7 +152,7 @@ function parseMarkdownBlocks(content: string): BlockNode[] {
     while (
       i < lines.length &&
       lines[i].trim() !== '' &&
-      !/^```/.test(lines[i].trim()) &&
+      !FENCE_OPEN_RE.test(lines[i].trim()) &&
       !/^#{1,4}\s+/.test(lines[i].trim()) &&
       !/^\s*[-*•]\s+/.test(lines[i]) &&
       !/^\s*\d+\.\s+/.test(lines[i])
@@ -149,6 +162,10 @@ function parseMarkdownBlocks(content: string): BlockNode[] {
     }
     if (paraLines.length > 0) {
       blocks.push({ type: 'paragraph', lines: paraLines });
+    } else {
+      // Unconditional forward-progress fallback so no input can stall the parser
+      blocks.push({ type: 'paragraph', lines: [lines[i]] });
+      i += 1;
     }
   }
 

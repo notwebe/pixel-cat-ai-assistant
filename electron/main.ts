@@ -1,9 +1,9 @@
-import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
+import dotenv from 'dotenv';
 import {
   app,
   BrowserWindow,
@@ -313,6 +313,33 @@ function createTrayIcon(): Electron.NativeImage {
   return nativeImage.createFromBuffer(png);
 }
 
+function resolveAppIconPath(): string | undefined {
+  const candidates = [
+    path.join(app.getAppPath(), 'build', 'icon.ico'),
+    path.resolve(__dirname, '..', 'build', 'icon.ico'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function syncLoginItemSettings(openAtLogin: boolean): void {
+  if (!app.isPackaged) {
+    return;
+  }
+  try {
+    app.setLoginItemSettings({
+      openAtLogin,
+      path: process.execPath,
+    });
+  } catch (err) {
+    console.error('Failed to update login item settings:', err);
+  }
+}
+
 function getPreloadPath(): string {
   return path.join(__dirname, 'preload.cjs');
 }
@@ -330,12 +357,14 @@ function loadRendererPage(win: BrowserWindow, page: 'index.html' | 'snip.html'):
 function createMainWindow(): BrowserWindow {
   isPanelExpanded = false;
   const pos = getDefaultWindowPosition();
+  const appIconPath = resolveAppIconPath();
 
   const win = new BrowserWindow({
     width: COMPACT_WIDTH,
     height: COMPACT_HEIGHT,
     x: pos.x,
     y: pos.y,
+    ...(appIconPath ? { icon: appIconPath } : {}),
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -466,7 +495,9 @@ async function openRegionSnipOverlay(): Promise<void> {
 }
 
 function setupTray(): void {
-  tray = new Tray(createTrayIcon());
+  const appIconPath = resolveAppIconPath();
+  const loadedIcon = appIconPath ? nativeImage.createFromPath(appIconPath) : null;
+  tray = new Tray(loadedIcon && !loadedIcon.isEmpty() ? loadedIcon : createTrayIcon());
   tray.setToolTip('Mochi — Desktop AI Assistant');
 
   const menu = Menu.buildFromTemplate([
@@ -606,7 +637,12 @@ function registerIpcHandlers(): void {
     if (!isPlainObject(patch)) {
       throw new Error('Invalid settings payload.');
     }
-    return settingsStore.update(patch as SettingsPatch);
+    const typedPatch = patch as SettingsPatch;
+    const updated = settingsStore.update(typedPatch);
+    if (typedPatch.openAtLogin !== undefined) {
+      syncLoginItemSettings(updated.openAtLogin);
+    }
+    return updated;
   });
 
   ipcMain.handle('sprites:pick', async (event, state: unknown) => {
@@ -1117,6 +1153,13 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
+    if (!app.isPackaged) {
+      const envPath = path.resolve(__dirname, '..', '.env');
+      if (fs.existsSync(envPath)) {
+        dotenv.config({ path: envPath });
+      }
+    }
+
     const userDataDir = app.getPath('userData');
     const secretCipher: SecretCipher | undefined = safeStorage.isEncryptionAvailable()
       ? {
@@ -1125,8 +1168,15 @@ if (!gotLock) {
         }
       : undefined;
 
-    settingsStore = new SettingsStore(userDataDir, undefined, secretCipher);
+    settingsStore = new SettingsStore(
+      userDataDir,
+      undefined,
+      secretCipher,
+      undefined,
+      () => app.isPackaged,
+    );
     historyStore = new HistoryStore(userDataDir);
+    syncLoginItemSettings(settingsStore.readRaw().openAtLogin);
 
     session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
       const isMain = Boolean(

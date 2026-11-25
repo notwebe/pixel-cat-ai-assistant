@@ -50,6 +50,7 @@ export interface AssistantSettings {
   ttsEnabled: boolean;
   walkEnabled: boolean;
   autoSaveScreenshots: boolean;
+  openAtLogin: boolean;
   transcriptionMode: TranscriptionMode;
   sprites: CustomSprites;
 }
@@ -71,6 +72,7 @@ export interface SettingsView extends AssistantSettings {
   hasEnvOrcaRouterApiKey: boolean;
   orcaRouterApiKeyConfigured: boolean;
   effectiveApiKeyConfigured: boolean;
+  isPackaged: boolean;
   spriteDataUrls: CustomSprites;
 }
 

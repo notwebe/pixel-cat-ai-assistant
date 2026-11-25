@@ -21,8 +21,57 @@
     "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.app.json --noEmit && node ./node_modules/typescript/bin/tsc -p tsconfig.node.json --noEmit && node ./node_modules/vite/bin/vite.js build && node ./scripts/build-electron.mjs",
     "start": "node ./node_modules/electron/cli.js .",
     "launch": "node ./scripts/launch.mjs",
+    "generate:icon": "node ./scripts/generate-icon.mjs",
+    "package": "node ./scripts/dist.mjs --portable",
+    "dist": "node ./scripts/dist.mjs",
     "test": "node ./node_modules/vitest/vitest.mjs run",
     "test:watch": "node ./node_modules/vitest/vitest.mjs"
+  },
+  "build": {
+    "appId": "com.notwebe.pixel-cat-ai-assistant",
+    "productName": "Pixel Cat Assistant",
+    "compression": "maximum",
+    "afterPack": "./scripts/after-pack.mjs",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "!dist-electron/**/*.map",
+      "!node_modules/**/*",
+      "build/icon.ico",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "PixelCatAssistant.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Pixel Cat Assistant",
+      "artifactName": "PixelCatAssistant-Setup-${version}.exe"
+    }
   },
   "keywords": [
     "electron",
@@ -47,6 +96,7 @@
     "@types/react-dom": "^19.0.3",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^35.0.0",
+    "electron-builder": "^26.18.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.7.3",
     "vite": "^6.1.1",
