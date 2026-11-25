@@ -1,12 +1,12 @@
 # Mochi — Desktop AI Assistant Character
 
-A customizable **2D / PNGTuber floating desktop AI assistant character** for Windows powered by **Electron 35**, **React 19 + TypeScript**, **Vite**, and the **Google Gemini Interactions API** (`@google/genai`).
+A customizable **2D / PNGTuber floating desktop AI assistant character** for Windows packaged as a compact standalone `.exe`, powered by **Electron 35**, **React 19 + TypeScript**, **Vite**, the **Google Gemini Interactions API** (`@google/genai`), and **OrcaRouter** (OpenAI-compatible API).
 
 ## Features
 
 - **Roaming Pixel Cat Companion**:
   - Crisp 4× integer-scaled (`80×80`) pixel cat rendered on a transparent, always-on-top frameless window that walks along your screen (biased toward the bottom taskbar edge).
-  - **Held-Cat Drag Animation**: Pick Mochi up with your mouse to trigger a playful dangling pose with kicking paws, swaying tail, and physics-damped pendulum swing as you drag it across your screen.
+  - **Held-Cat Drag Animation**: Pick Mochi up with your mouse to trigger a playful dangling pose with kicking paws, swaying tail, physics-damped pendulum swing while dragging, and a landing squish when released.
   - Click-through transparent stage keeps apps behind Mochi clickable; quick action orbs stay tucked away until you hover over or click/pin the cat (or summon it from the **Windows System Tray** or `Ctrl+Shift+Space`).
   - Built-in character states (`idle`, `walking`, `dragging`, `listening`, `thinking`, `speaking`, `happy`, `error`), adjustable character size, walking toggle, and position reset.
 - **Multi-Provider Markdown Chat, Persistence & Screen Vision**:
@@ -24,12 +24,15 @@ A customizable **2D / PNGTuber floating desktop AI assistant character** for Win
   - Upload your own `.png`, `.jpg`, `.jpeg`, `.webp`, or `.gif` artwork for `Idle`, `Listening`, `Thinking`, `Speaking`, and `Happy` in **Settings**, clear individual slots, or click **Reset Default** anytime.
   - Rename your character and customize its personality/system prompt.
 - **Optional Browser Voice Output (TTS)**: Toggle spoken replies using built-in OS voices at zero extra API cost.
+- **Compact Standalone Windows App & Auto-Start**:
+  - Packages into an optimized portable `PixelCatAssistant.exe` (~74 MB) with a custom pixel-cat icon via minified production Electron bundles, excluded `node_modules`/sourcemaps in `app.asar`, `en-US.pak`-only Chromium locale trimming, `maximum` compression, and automatic `release/` staging cleanup.
+  - Includes a built-in **Launch at Windows Startup** toggle in **Settings**.
 
 ## Prerequisites
 
 - **Windows 10 / 11**
 - **Node.js 20+** (Node 22 LTS recommended — Electron 35 bundles Node 22)
-- A **Google Gemini API key** from [Google AI Studio](https://aistudio.google.com/apikey)
+- An API key for **Google Gemini** ([Google AI Studio](https://aistudio.google.com/apikey)) and/or **OrcaRouter** ([orcarouter.ai](https://orcarouter.ai))
 
 ## Quick Start
 
@@ -38,9 +41,9 @@ A customizable **2D / PNGTuber floating desktop AI assistant character** for Win
    npm install
    ```
 
-2. **Configure your Gemini API key** (choose either method — both stay local and are ignored by Git):
-   - **Option A (In-App — Recommended):** Launch the app, open the **Settings** tab, paste your API key, and click **Save Settings**. The key is encrypted locally via Electron's OS-backed `safeStorage`.
-   - **Option B (`.env` file):** Copy `.env.example` to `.env` and uncomment `GEMINI_API_KEY` (or `GOOGLE_API_KEY`):
+2. **Configure your AI provider API key** (choose either method — both stay local and are ignored by Git):
+   - **Option A (In-App — Recommended for both dev and packaged `.exe`):** Launch the app, open the **Settings** tab, select your provider (**Google Gemini** or **OrcaRouter**), paste your API key (`GEMINI_API_KEY` or `sk-orca-...`), and click **Save Settings**. Keys are encrypted locally via Electron's OS-backed `safeStorage`.
+   - **Option B (`.env` file for local unpackaged development):** Copy `.env.example` to `.env` and uncomment `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and/or `ORCAROUTER_API_KEY`:
      - **Command Prompt (`cmd.exe`)**:
        ```bat
        copy .env.example .env
@@ -62,8 +65,8 @@ A customizable **2D / PNGTuber floating desktop AI assistant character** for Win
    npm test
    ```
 
-5. **Build & package Windows executables** (outputs to `release/`):
-   - **Portable `.exe` only** (`release\PixelCatAssistant.exe`):
+5. **Build & package Windows executables** (outputs to `release/`, invoking Node entrypoints directly so paths with `&` work cleanly):
+   - **Portable `.exe` only — Recommended** (builds `release\PixelCatAssistant.exe`, ~74 MB, and automatically removes intermediate `release\win-unpacked\` and `builder-debug.yml` staging files):
      ```bat
      npm run package
      ```
@@ -111,8 +114,8 @@ In the packaged app (`release\PixelCatAssistant.exe` or installed via Setup), op
 
 ## Security & Privacy
 
-- **Encrypted API Key Storage**: Keys saved in **Settings** are encrypted on disk using Electron's OS-backed `safeStorage` (`encryptedApiKey` in `config.json` inside your Electron user-data folder) and are never returned in plaintext to the renderer UI over IPC. Environment variables (`GEMINI_API_KEY` or `GOOGLE_API_KEY` in `.env`) are also supported and excluded via `.gitignore`.
-- **Process Isolation & Sandboxing**: Both Electron windows run with `sandbox: true`, `contextIsolation: true`, `nodeIntegration: false`, a strict Content Security Policy (CSP), and navigation/popup blocking. All Gemini API calls execute strictly inside Electron's Main Process.
+- **Encrypted API Key Storage**: Both Google Gemini and OrcaRouter keys saved in **Settings** are encrypted on disk using Electron's OS-backed `safeStorage` (`config.json` inside your Electron user-data folder) and are never returned in plaintext to the renderer UI over IPC. Environment variables (`GEMINI_API_KEY` / `GOOGLE_API_KEY` and `ORCAROUTER_API_KEY` in `.env`) are loaded only in unpackaged development builds (`!app.isPackaged`) and excluded via `.gitignore`.
+- **Process Isolation & Sandboxing**: Both Electron windows run with `sandbox: true`, `contextIsolation: true`, `nodeIntegration: false`, a strict Content Security Policy (CSP), and navigation/popup blocking. All AI provider API calls (**Google Gemini** and **OrcaRouter**) execute strictly inside Electron's Main Process.
 - **Scoped File Handling**: Local audio files chosen in the **Transcribe** tab are tracked in the Main Process via opaque tokens rather than arbitrary renderer-supplied file paths, and files over 15 MB uploaded to the Gemini Files API are deleted in a `finally` block after transcription.
 
 ## Troubleshooting

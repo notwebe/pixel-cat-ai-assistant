@@ -2,7 +2,7 @@
   "name": "ai-assistant-character",
   "version": "1.0.0",
   "private": true,
-  "description": "Customizable 2D/PNGTuber floating desktop AI assistant character powered by Google Gemini (screen vision + audio transcription).",
+  "description": "Customizable 2D/PNGTuber floating desktop AI assistant character for Windows powered by Google Gemini & OrcaRouter (screen vision, audio transcription, and standalone .exe packaging).",
   "author": "notwebe",
   "repository": {
     "type": "git",
@@ -79,6 +79,7 @@
     "desktop-pet",
     "pngtuber",
     "gemini",
+    "orcarouter",
     "screenshot",
     "transcription"
   ],
